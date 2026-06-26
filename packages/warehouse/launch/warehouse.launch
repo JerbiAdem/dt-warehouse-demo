@@ -1,0 +1,23 @@
+<launch>
+    <arg name="veh" default="mybot"/>
+    <arg name="station_stop_duration" default="3.0"/>
+
+    <!-- Duckie Detector Node -->
+    <node pkg="warehouse" type="duckie_detector_node.py"
+          name="duckie_detector_node" output="screen">
+        <remap from="~image/compressed"
+               to="/$(arg veh)/camera_node/image/compressed"/>
+        <remap from="~obstacle_detected"
+               to="/$(arg veh)/warehouse/obstacle_detected"/>
+    </node>
+
+    <!-- Warehouse Manager Node -->
+    <node pkg="warehouse" type="warehouse_manager_node.py"
+          name="warehouse_manager_node" output="screen">
+        <param name="veh" value="$(arg veh)"/>
+        <param name="station_stop_duration" value="$(arg station_stop_duration)"/>
+        <remap from="~obstacle_detected"
+               to="/$(arg veh)/warehouse/obstacle_detected"/>
+    </node>
+
+</launch>
