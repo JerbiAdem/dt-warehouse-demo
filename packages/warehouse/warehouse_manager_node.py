@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 
 import rospy
-from std_msgs.msg import Bool
-from duckietown_msgs.msg import AprilTagDetectionArray, BoolStamped, WheelsCmdStamped
+from duckietown_msgs.msg import AprilTagDetectionArray, WheelsCmdStamped
 
-
-# Route definition: list of station names in order
+# Route definition
 ROUTE = ['A', 'B', 'C', 'D']
 
 # AprilTag ID → Station name mapping
@@ -17,9 +15,10 @@ STATION_MAP = {
 }
 
 # FSM States
-STATE_NAVIGATING = 'NAVIGATING'
-STATE_AT_STATION = 'AT_STATION'
-STATE_OBSTACLE_STOPPED = 'OBSTACLE_STOPPED'
+STATE_NAVIGATING    = 'NAVIGATING'
+STATE_ROTATING_BACK = 'ROTATING_BACK'
+STATE_LOADING       = 'LOADING'
+STATE_ROTATING_FWD  = 'ROTATING_FWD'
 STATE_MISSION_COMPLETE = 'MISSION_COMPLETE'
 
 
@@ -27,94 +26,116 @@ class WarehouseManagerNode:
 
     def __init__(self):
         self.node_name = rospy.get_name()
+        self.veh = rospy.get_param('~veh', 'mybot')
 
-        # Mission state
+        # FSM
         self.state = STATE_NAVIGATING
         self.current_target_idx = 0
-        self.obstacle_detected = False
-        self.at_stop_line = False
-        self.station_stop_duration = rospy.get_param("~station_stop_duration", 3.0)
 
-        # Publishers
-        self.pub_wheels_cmd = rospy.Publisher(
-            f"/{rospy.get_param('~veh')}/wheels_driver_node/wheels_cmd",
+        # Tunable parameters
+        self.rotation_duration = rospy.get_param('~rotation_duration', 2.0)  # seconds for 180°
+        self.loading_duration  = rospy.get_param('~loading_duration', 3.0)   # seconds at station
+        self.rotation_speed    = rospy.get_param('~rotation_speed', 0.5)     # wheel speed for rotation
+
+        # Publisher
+        self.pub_wheels = rospy.Publisher(
+            f'/{self.veh}/wheels_driver_node/wheels_cmd',
             WheelsCmdStamped,
             queue_size=1
         )
 
-        # Subscribers
-        self.sub_obstacle = rospy.Subscriber(
-            "~obstacle_detected",
-            Bool,
-            self.cb_obstacle,
-            queue_size=1
-        )
-
-        self.sub_apriltag = rospy.Subscriber(
-            f"/{rospy.get_param('~veh')}/apriltag_detector_node/detections",
+        # Subscriber
+        rospy.Subscriber(
+            f'/{self.veh}/apriltag_detector_node/detections',
             AprilTagDetectionArray,
             self.cb_apriltag,
             queue_size=1
         )
 
-        self.sub_stop_line = rospy.Subscriber(
-            f"/{rospy.get_param('~veh')}/stop_line_filter_node/at_stop_line",
-            BoolStamped,
-            self.cb_stop_line,
-            queue_size=1
-        )
-
-        rospy.loginfo(f"[{self.node_name}] Initialized. Route: {ROUTE}")
-        rospy.loginfo(f"[{self.node_name}] First target: {ROUTE[self.current_target_idx]}")
-
-    def cb_obstacle(self, msg):
-        self.obstacle_detected = msg.data
-
-        if self.obstacle_detected and self.state == STATE_NAVIGATING:
-            self.state = STATE_OBSTACLE_STOPPED
-            self.stop_robot()
-            rospy.loginfo(f"[{self.node_name}] OBSTACLE DETECTED — Stopping!")
-
-        elif not self.obstacle_detected and self.state == STATE_OBSTACLE_STOPPED:
-            self.state = STATE_NAVIGATING
-            rospy.loginfo(f"[{self.node_name}] Path clear — Resuming!")
+        rospy.loginfo(f'[{self.node_name}] Started. Route: {ROUTE}')
+        rospy.loginfo(f'[{self.node_name}] First target: {ROUTE[self.current_target_idx]}')
 
     def cb_apriltag(self, msg):
         if self.state != STATE_NAVIGATING:
+            return
+
+        if self.current_target_idx >= len(ROUTE):
             return
 
         target_station = ROUTE[self.current_target_idx]
 
         for detection in msg.detections:
             station = STATION_MAP.get(detection.tag_id)
-            if station == target_station and self.at_stop_line:
-                rospy.loginfo(f"[{self.node_name}] Arrived at station {station}!")
-                self.state = STATE_AT_STATION
+            if station == target_station:
+                rospy.loginfo(f'[{self.node_name}] Station {station} detected — stopping!')
                 self.stop_robot()
+                self.state = STATE_ROTATING_BACK
                 rospy.Timer(
-                    rospy.Duration(self.station_stop_duration),
-                    self.advance_to_next_station,
+                    rospy.Duration(0.5),  # small delay before rotating
+                    lambda e: self.start_rotation_back(),
                     oneshot=True
                 )
                 break
 
-    def cb_stop_line(self, msg):
-        self.at_stop_line = msg.data
+    def start_rotation_back(self):
+        rospy.loginfo(f'[{self.node_name}] Rotating back to station...')
+        self.rotate(direction='left')
+        rospy.Timer(
+            rospy.Duration(self.rotation_duration),
+            lambda e: self.start_loading(),
+            oneshot=True
+        )
+
+    def start_loading(self):
+        rospy.loginfo(f'[{self.node_name}] Loading at station {ROUTE[self.current_target_idx]}...')
+        self.stop_robot()
+        self.state = STATE_LOADING
+        rospy.Timer(
+            rospy.Duration(self.loading_duration),
+            lambda e: self.start_rotation_fwd(),
+            oneshot=True
+        )
+
+    def start_rotation_fwd(self):
+        rospy.loginfo(f'[{self.node_name}] Rotating back to forward position...')
+        self.state = STATE_ROTATING_FWD
+        self.rotate(direction='left')  # same direction = completes the 360° total
+        rospy.Timer(
+            rospy.Duration(self.rotation_duration),
+            lambda e: self.advance_to_next_station(),
+            oneshot=True
+        )
+
+    def advance_to_next_station(self):
+        self.stop_robot()
+        self.current_target_idx += 1
+
+        if self.current_target_idx >= len(ROUTE):
+            self.state = STATE_MISSION_COMPLETE
+            rospy.loginfo(f'[{self.node_name}] Mission complete!')
+            return
+
+        self.state = STATE_NAVIGATING
+        rospy.loginfo(f'[{self.node_name}] Next target: {ROUTE[self.current_target_idx]}')
+
+    def rotate(self, direction='left'):
+        msg = WheelsCmdStamped()
+        if direction == 'left':
+            msg.vel_left  = -self.rotation_speed
+            msg.vel_right =  self.rotation_speed
+        else:
+            msg.vel_left  =  self.rotation_speed
+            msg.vel_right = -self.rotation_speed
+        self.pub_wheels.publish(msg)
 
     def stop_robot(self):
         msg = WheelsCmdStamped()
-        msg.vel_left = 0.0
+        msg.vel_left  = 0.0
         msg.vel_right = 0.0
-        self.pub_wheels_cmd.publish(msg)
-
-    def advance_to_next_station(self, event):
-        self.current_target_idx = (self.current_target_idx + 1) % len(ROUTE)
-        self.at_stop_line = False
-        self.state = STATE_NAVIGATING
-        rospy.loginfo(f"[{self.node_name}] Next target: {ROUTE[self.current_target_idx]}")
+        self.pub_wheels.publish(msg)
 
 
-if __name__ == "__main__":
-    rospy.init_node("warehouse_manager_node", anonymous=False)
+if __name__ == '__main__':
+    rospy.init_node('warehouse_manager_node', anonymous=False)
     node = WarehouseManagerNode()
     rospy.spin()
