@@ -28,8 +28,8 @@ class WarehouseManagerNode:
         self.node_name = rospy.get_name()
         self.veh = rospy.get_param('~veh', 'mybot')
 
-	rospy.loginfo(f'[{self.node_name}] Vehicle name: {self.veh}')
-	rospy.loginfo(f'[{self.node_name}] Subscribing to: /{self.veh}/apriltag_detector_node/detections')
+        rospy.loginfo(f'[{self.node_name}] Vehicle name: {self.veh}')
+        rospy.loginfo(f'[{self.node_name}] Subscribing to: /{self.veh}/apriltag_detector_node/detections')
 
         # FSM
         self.state = STATE_NAVIGATING
